@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG Logged-Out Profile Viewer
-// @namespace    https://github.com/atharvj/ig-logged-out-profile-viewer
-// @version      0.5.1
+// @namespace    https://github.com/atharvj/ig-to-imginn-viewer
+// @version      0.5.3
 // @description  Opens public Instagram links in Imginn only when logged out, and shows Imginn posts in a popup without losing your place.
 // @author       Intellectual07
 // @license      MIT
@@ -25,6 +25,8 @@
   const FRAME_STYLE_ID = "igiv-frame-style";
   const MODAL_OPEN_CLASS = "igiv-modal-open";
   const HIDDEN_CLASS = "igiv-hidden";
+  const INSTAGRAM_STAY_PARAM = "igiv_stay";
+  const INSTAGRAM_STAY_VALUE = "1";
   const VIEWER_AD_SELECTOR = [
     "ins.adsbygoogle",
     'iframe[id^="aswift_"]',
@@ -69,6 +71,7 @@
   let activePostCandidates = [];
   let activePostCandidateIndex = -1;
   let activePreview = null;
+  let viewerChallengeDetected = false;
 
   function parseUrl(value, base) {
     try {
@@ -223,6 +226,32 @@
     );
   }
 
+  function looksLikePrivateInstagramProfile() {
+    if (!document.body) return false;
+
+    const text = (document.body.innerText || "").replace(/\s+/g, " ");
+    if (!/this (?:account|profile) is private/i.test(text)) return false;
+
+    return Boolean(
+      document.querySelector('meta[property="og:image"][content], header img, main img, article img')
+    );
+  }
+
+  function isInstagramStayUrl(url) {
+    return Boolean(url && url.searchParams.get(INSTAGRAM_STAY_PARAM) === INSTAGRAM_STAY_VALUE);
+  }
+
+  function removeInstagramStayMarker(url) {
+    const cleanUrl = new URL(url.href);
+    cleanUrl.searchParams.delete(INSTAGRAM_STAY_PARAM);
+
+    try {
+      window.history.replaceState(window.history.state, "", cleanUrl.href);
+    } catch (_) {
+      // The marker is harmless if Instagram blocks history changes.
+    }
+  }
+
   function imginnUrlForInstagramUrl(url) {
     const loginTarget = instagramUrlFromLoginRedirect(url);
     if (loginTarget) return imginnUrlForInstagramUrl(loginTarget);
@@ -268,8 +297,11 @@
     if (!currentUrl || !isInstagramHost(currentUrl.hostname)) return "stay";
     if (!imginnUrlForInstagramUrl(currentUrl)) return "stay";
     if (looksLoggedInToInstagram()) return "stay";
+    if (looksLikePrivateInstagramProfile()) return "stay";
 
     if (instagramUrlFromLoginRedirect(currentUrl) || looksLoggedOutToInstagram()) {
+      if (isProfilePath(currentUrl.pathname) && document.readyState === "loading") return "pending";
+
       redirectInstagramToViewer();
       return "redirected";
     }
@@ -280,6 +312,10 @@
   function installInstagramLoggedOutRedirect() {
     const currentUrl = parseUrl(window.location.href);
     if (!currentUrl || !isInstagramHost(currentUrl.hostname)) return;
+    if (isInstagramStayUrl(currentUrl)) {
+      removeInstagramStayMarker(currentUrl);
+      return;
+    }
     if (!imginnUrlForInstagramUrl(currentUrl)) return;
     if (hasReadableInstagramAuthCookie()) return;
 
@@ -329,7 +365,7 @@
   }
 
   function onReady(callback) {
-    if (document.body) {
+    if (document.readyState !== "loading" && document.body) {
       callback();
       return;
     }
@@ -337,8 +373,50 @@
     document.addEventListener("DOMContentLoaded", callback, { once: true });
   }
 
+  function isViewerNotFoundPage() {
+    const title = (document.title || "").toLowerCase();
+    const text = document.body ? (document.body.innerText || "").replace(/\s+/g, " ").toLowerCase() : "";
+
+    return Boolean(
+      document.querySelector(".page-error.notfound, .page-error--not-found") ||
+        title.includes("page not found") ||
+        title.includes("content not found") ||
+        (text.includes("content not found") && text.includes("content has been deleted"))
+    );
+  }
+
+  function instagramProfileFallbackUrl(username) {
+    const url = new URL(`/${cleanPathPart(username)}/`, "https://www.instagram.com");
+    url.searchParams.set(INSTAGRAM_STAY_PARAM, INSTAGRAM_STAY_VALUE);
+    return url.href;
+  }
+
+  function installUnavailableProfileFallback() {
+    const currentUrl = parseUrl(window.location.href);
+    if (!currentUrl || !isViewerHost(currentUrl.hostname) || !isProfilePath(currentUrl.pathname)) return;
+
+    const username = viewerProfileUsernameFromPath(currentUrl.pathname);
+    if (!username) return;
+
+    let redirected = false;
+    const check = () => {
+      if (redirected || !isViewerNotFoundPage()) return;
+
+      redirected = true;
+      const fallbackUrl = instagramProfileFallbackUrl(username);
+      window.location.replace(fallbackUrl);
+      console.info(`${SCRIPT_NAME}: Imginn could not show @${username}; opening the Instagram profile instead.`);
+    };
+
+    onReady(check);
+    window.addEventListener("load", check, { once: true });
+  }
+
   function ensureStyles() {
     if (document.getElementById(STYLE_ID)) return;
+
+    const styleParent = document.head || document.documentElement;
+    if (!styleParent) return;
 
     const style = document.createElement("style");
     style.id = STYLE_ID;
@@ -358,6 +436,7 @@
 
       html[data-igiv-viewer-page="true"] .page-user > .block-sulvo,
       html[data-igiv-viewer-page="true"] .page-user > .block-money,
+      html[data-igiv-viewer-page="true"] .page-user .demand-supply__display,
       html[data-igiv-viewer-page="true"] .page-user > .share-to,
       html[data-igiv-viewer-page="true"] .page-user > .download-wrap {
         display: none !important;
@@ -376,6 +455,33 @@
 
       html[data-igiv-viewer-page="true"] .page-user > .tabs {
         margin-bottom: 0 !important;
+      }
+
+      html[data-igiv-viewer-page="true"] [data-igiv-gap-block="true"] {
+        display: none !important;
+        height: 0 !important;
+        margin: 0 !important;
+        min-height: 0 !important;
+        overflow: hidden !important;
+        padding: 0 !important;
+      }
+
+      html[data-igiv-viewer-page="true"] [data-igiv-post-grid="true"],
+      html[data-igiv-viewer-page="true"] [data-igiv-grid-branch="true"] {
+        margin-top: 0 !important;
+        min-height: 0 !important;
+        padding-top: 0 !important;
+        top: auto !important;
+        transform: none !important;
+      }
+
+      html[data-igiv-viewer-page="true"] [data-igiv-post-grid="true"] {
+        position: static !important;
+      }
+
+      html[data-igiv-viewer-page="true"] [data-igiv-grid-branch="true"]::before {
+        content: none !important;
+        display: none !important;
       }
 
       html[data-igiv-viewer-page="true"] [data-igiv-hidden-spacer="true"] {
@@ -547,7 +653,7 @@
       }
     `;
 
-    (document.head || document.documentElement).appendChild(style);
+    styleParent.appendChild(style);
   }
 
   function createModal() {
@@ -620,6 +726,12 @@
       activePostCandidates = candidateUrlsForPost(url);
       activePostCandidateIndex = 0;
       activePreview = postPreviewFromElement(sourceElement);
+
+      if (viewerChallengeDetected) {
+        activeOpenLink.href = activePostCandidates[0] || sameViewerOriginUrl(url);
+        showPreviewFallback("challenge");
+        return;
+      }
 
       loadActivePostCandidate();
     });
@@ -747,7 +859,7 @@
     );
   }
 
-  function showPreviewFallback() {
+  function showPreviewFallback(reason) {
     const modal = document.getElementById(MODAL_ID);
     if (!modal) return;
 
@@ -755,6 +867,10 @@
     activeFrame.dataset.igivFallback = "true";
 
     const preview = activePreview || {};
+    const explanation =
+      reason === "challenge"
+        ? "Imginn requested Cloudflare verification for the post detail page. This preview uses the media already loaded on the profile and prevents more detail-page requests for this profile view."
+        : "The profile card loaded, but every known Imginn detail URL returned Content Not Found. Comments and tagged users are only available if Imginn exposes the post page.";
     const mediaHtml = preview.videoSrc
       ? `<video controls playsinline src="${escapeHtml(preview.videoSrc)}"></video>`
       : preview.imageSrc
@@ -840,7 +956,7 @@
     <section data-media>${mediaHtml}</section>
     <section data-info>
       <h1>Imginn could not open the post detail page</h1>
-      <p>The profile card loaded, but every known Imginn detail URL returned Content Not Found. Comments and tagged users are only available if Imginn exposes the post page.</p>
+      <p>${explanation}</p>
       ${preview.text ? `<p data-caption>${escapeHtml(preview.text)}</p>` : ""}
       <p>URLs tried:</p>
       <ul>${triedLinks}</ul>
@@ -983,6 +1099,89 @@
 
   function normalizedText(element) {
     return (element.textContent || "").trim().replace(/\s+/g, " ");
+  }
+
+  function isViewerStoriesPath(pathname) {
+    return /^\/stories\/[A-Za-z0-9._]{1,30}\/?$/.test(pathname);
+  }
+
+  function lowestCommonElementAncestor(first, second, boundary) {
+    const ancestors = new Set();
+
+    for (let node = first; node && node !== boundary.parentElement; node = node.parentElement) {
+      ancestors.add(node);
+    }
+
+    for (let node = second; node && node !== boundary.parentElement; node = node.parentElement) {
+      if (ancestors.has(node)) return node;
+    }
+
+    return null;
+  }
+
+  function directChildUnder(ancestor, element) {
+    let node = element;
+
+    while (node && node.parentElement !== ancestor) {
+      node = node.parentElement;
+    }
+
+    return node;
+  }
+
+  function findProfilePostGrid(page, tabs) {
+    const candidates = Array.from(page.querySelectorAll(".items")).filter((element) =>
+      Boolean(tabs.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)
+    );
+
+    return (
+      candidates.find((element) => element.querySelector("a[href] img, a[href] video, picture, video")) ||
+      candidates[0] ||
+      null
+    );
+  }
+
+  function clearProfileGapMarkers(page) {
+    for (const element of page.querySelectorAll(
+      "[data-igiv-gap-block='true'], [data-igiv-post-grid='true'], [data-igiv-grid-branch='true']"
+    )) {
+      delete element.dataset.igivGapBlock;
+      delete element.dataset.igivPostGrid;
+      delete element.dataset.igivGridBranch;
+    }
+  }
+
+  function collapseProfilePostGap() {
+    const currentUrl = parseUrl(window.location.href);
+    const page = document.querySelector(".page-user");
+    if (!currentUrl || !page) return false;
+
+    clearProfileGapMarkers(page);
+    if (isViewerStoriesPath(currentUrl.pathname)) return false;
+
+    const tabs = Array.from(page.querySelectorAll(".tabs, nav, [role='tablist']")).find((element) =>
+      isViewerProfileTabsText(normalizedText(element))
+    );
+    if (!tabs) return false;
+
+    const grid = findProfilePostGrid(page, tabs);
+    if (!grid) return false;
+
+    const commonAncestor = lowestCommonElementAncestor(tabs, grid, page);
+    if (!commonAncestor) return false;
+
+    const tabsBranch = directChildUnder(commonAncestor, tabs);
+    const gridBranch = directChildUnder(commonAncestor, grid);
+    if (!tabsBranch || !gridBranch || tabsBranch === gridBranch) return false;
+    if (!(tabsBranch.compareDocumentPosition(gridBranch) & Node.DOCUMENT_POSITION_FOLLOWING)) return false;
+
+    for (let sibling = tabsBranch.nextElementSibling; sibling && sibling !== gridBranch; sibling = sibling.nextElementSibling) {
+      sibling.dataset.igivGapBlock = "true";
+    }
+
+    grid.dataset.igivPostGrid = "true";
+    gridBranch.dataset.igivGridBranch = "true";
+    return true;
   }
 
   function isViewerProfileTabsText(text) {
@@ -1204,7 +1403,8 @@
       const frameDocument = activeFrame.contentDocument;
 
       if (activeFrame.dataset.igivFallback !== "true" && isCloudflareChallengeFrame(frameDocument)) {
-        if (modal) modal.dataset.loading = "false";
+        viewerChallengeDetected = true;
+        showPreviewFallback("challenge");
         return;
       }
 
@@ -1382,6 +1582,42 @@
     }
   }
 
+  function installProfileGapCleanup() {
+    onReady(() => {
+      let queued = false;
+      let retries = 0;
+
+      const schedule = () => {
+        if (queued) return;
+        queued = true;
+
+        window.requestAnimationFrame(() => {
+          queued = false;
+          collapseProfilePostGap();
+        });
+      };
+
+      const observer = new MutationObserver(schedule);
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+      });
+
+      document.addEventListener("load", schedule, true);
+      window.addEventListener("resize", schedule, { passive: true });
+      schedule();
+
+      const retryTimer = window.setInterval(() => {
+        retries += 1;
+        schedule();
+
+        if (retries >= 20) {
+          window.clearInterval(retryTimer);
+        }
+      }, 500);
+    });
+  }
+
   function installProfileCompactor() {
     onReady(() => {
       ensureStyles();
@@ -1423,10 +1659,19 @@
   function installViewerModal() {
     document.addEventListener("click", handleViewerClick, true);
     document.addEventListener("keydown", handleKeydown, true);
+    installUnavailableProfileFallback();
 
     if (isViewerProfileUrl(parseUrl(window.location.href))) {
-      document.documentElement.dataset.igivViewerPage = "true";
-      ensureStyles();
+      const enableViewerPageStyles = () => {
+        if (!document.documentElement) return;
+
+        document.documentElement.dataset.igivViewerPage = "true";
+        ensureStyles();
+      };
+
+      enableViewerPageStyles();
+      onReady(enableViewerPageStyles);
+      installProfileGapCleanup();
     }
 
     console.info(`${SCRIPT_NAME}: Imginn popup mode is active.`);
