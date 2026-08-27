@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG Logged-Out Profile Viewer
 // @namespace    https://github.com/atharvj/ig-to-imginn-viewer
-// @version      0.5.3
+// @version      0.5.4
 // @description  Opens public Instagram links in Imginn only when logged out, and shows Imginn posts in a popup without losing your place.
 // @author       Intellectual07
 // @license      MIT
@@ -23,10 +23,13 @@
   const MODAL_ID = "igiv-post-modal";
   const STYLE_ID = "igiv-style";
   const FRAME_STYLE_ID = "igiv-frame-style";
+  const RECOVERY_STATUS_ID = "igiv-recovery-status";
   const MODAL_OPEN_CLASS = "igiv-modal-open";
   const HIDDEN_CLASS = "igiv-hidden";
   const INSTAGRAM_STAY_PARAM = "igiv_stay";
   const INSTAGRAM_STAY_VALUE = "1";
+  const VIEWER_RETRY_PARAM = "igiv_retry";
+  const VIEWER_CACHE_BUST_PARAM = "igiv_bust";
   const VIEWER_AD_SELECTOR = [
     "ins.adsbygoogle",
     'iframe[id^="aswift_"]',
@@ -37,6 +40,8 @@
   ].join(", ");
   const INSTAGRAM_LOGIN_CHECK_TIMEOUT_MS = 5000;
   const INSTAGRAM_LOGIN_CHECK_INTERVAL_MS = 250;
+  const VIEWER_SERVER_ERROR_MAX_RETRIES = 2;
+  const VIEWER_SERVER_ERROR_RETRY_DELAY_MS = 900;
 
   const LOGIN_PATH_RE = /^\/accounts\/login\/?$/;
   const INSTAGRAM_POST_PATH_RE = /^\/p\/([^/?#]+)\/?$/;
@@ -385,30 +390,154 @@
     );
   }
 
+  function isViewerServerErrorPage() {
+    const title = (document.title || "").replace(/\s+/g, " ").toLowerCase();
+    const text = document.body ? (document.body.innerText || "").replace(/\s+/g, " ").toLowerCase() : "";
+
+    return title.includes("server error") || /server error,? please try again later\.?/.test(text);
+  }
+
+  function hasViewerProfileContent() {
+    const page = document.querySelector(".page-user");
+    return Boolean(page && page.querySelector(".userinfo, .tabs, .items"));
+  }
+
+  function viewerRetryCount(url) {
+    const value = Number.parseInt(url.searchParams.get(VIEWER_RETRY_PARAM) || "0", 10);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+
+  function cleanViewerRecoveryParams(url) {
+    if (!url.searchParams.has(VIEWER_RETRY_PARAM) && !url.searchParams.has(VIEWER_CACHE_BUST_PARAM)) return;
+
+    const cleanUrl = new URL(url.href);
+    cleanUrl.searchParams.delete(VIEWER_RETRY_PARAM);
+    cleanUrl.searchParams.delete(VIEWER_CACHE_BUST_PARAM);
+
+    try {
+      window.history.replaceState(window.history.state, "", cleanUrl.href);
+    } catch (_) {
+      // Recovery parameters are harmless if Imginn blocks history changes.
+    }
+  }
+
+  function showViewerRecoveryStatus(message) {
+    if (!document.body) return;
+
+    let status = document.getElementById(RECOVERY_STATUS_ID);
+    if (!status) {
+      const bodyStyle = window.getComputedStyle(document.body);
+      status = document.createElement("div");
+      status.id = RECOVERY_STATUS_ID;
+      status.setAttribute("role", "status");
+      status.style.cssText = [
+        "align-items:center",
+        `background:${bodyStyle.backgroundColor === "rgba(0, 0, 0, 0)" ? "#fff" : bodyStyle.backgroundColor}`,
+        `color:${bodyStyle.color || "#111"}`,
+        "display:flex",
+        "font:600 14px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
+        "inset:0",
+        "justify-content:center",
+        "letter-spacing:0",
+        "position:fixed",
+        "z-index:2147483646",
+      ].join(";");
+      document.body.appendChild(status);
+    }
+
+    status.textContent = message;
+  }
+
   function instagramProfileFallbackUrl(username) {
     const url = new URL(`/${cleanPathPart(username)}/`, "https://www.instagram.com");
     url.searchParams.set(INSTAGRAM_STAY_PARAM, INSTAGRAM_STAY_VALUE);
     return url.href;
   }
 
-  function installUnavailableProfileFallback() {
+  function installViewerProfileRecovery() {
     const currentUrl = parseUrl(window.location.href);
-    if (!currentUrl || !isViewerHost(currentUrl.hostname) || !isProfilePath(currentUrl.pathname)) return;
+    if (!isViewerProfileUrl(currentUrl)) return;
 
     const username = viewerProfileUsernameFromPath(currentUrl.pathname);
     if (!username) return;
 
-    let redirected = false;
-    const check = () => {
-      if (redirected || !isViewerNotFoundPage()) return;
+    let handled = false;
+    let observer = null;
 
-      redirected = true;
+    const stopObserving = () => {
+      if (observer) observer.disconnect();
+      observer = null;
+    };
+
+    const openInstagramFallback = () => {
+      if (handled) return;
+
+      handled = true;
+      stopObserving();
+      showViewerRecoveryStatus("Opening the Instagram profile...");
       const fallbackUrl = instagramProfileFallbackUrl(username);
       window.location.replace(fallbackUrl);
       console.info(`${SCRIPT_NAME}: Imginn could not show @${username}; opening the Instagram profile instead.`);
     };
 
-    onReady(check);
+    const retryServerError = () => {
+      if (handled) return;
+
+      const retryCount = viewerRetryCount(currentUrl);
+      if (retryCount >= VIEWER_SERVER_ERROR_MAX_RETRIES) {
+        openInstagramFallback();
+        return;
+      }
+
+      handled = true;
+      stopObserving();
+
+      const retryUrl = new URL(currentUrl.href);
+      retryUrl.searchParams.set(VIEWER_RETRY_PARAM, String(retryCount + 1));
+      retryUrl.searchParams.set(VIEWER_CACHE_BUST_PARAM, Date.now().toString(36));
+      const delay = VIEWER_SERVER_ERROR_RETRY_DELAY_MS * 2 ** retryCount;
+      showViewerRecoveryStatus(`Retrying profile... (${retryCount + 1}/${VIEWER_SERVER_ERROR_MAX_RETRIES})`);
+
+      window.setTimeout(() => {
+        window.stop();
+        window.location.replace(retryUrl.href);
+      }, delay);
+
+      console.info(`${SCRIPT_NAME}: Imginn server error for @${username}; retrying (${retryCount + 1}/${VIEWER_SERVER_ERROR_MAX_RETRIES}).`);
+    };
+
+    const check = () => {
+      if (handled) return;
+
+      if (isViewerServerErrorPage()) {
+        retryServerError();
+        return;
+      }
+
+      if (isProfilePath(currentUrl.pathname) && isViewerNotFoundPage()) {
+        openInstagramFallback();
+        return;
+      }
+
+      if (hasViewerProfileContent()) {
+        handled = true;
+        stopObserving();
+        cleanViewerRecoveryParams(currentUrl);
+      }
+    };
+
+    const start = () => {
+      check();
+      if (handled || !document.body) return;
+
+      observer = new MutationObserver(check);
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+      });
+    };
+
+    onReady(start);
     window.addEventListener("load", check, { once: true });
   }
 
@@ -1659,7 +1788,7 @@
   function installViewerModal() {
     document.addEventListener("click", handleViewerClick, true);
     document.addEventListener("keydown", handleKeydown, true);
-    installUnavailableProfileFallback();
+    installViewerProfileRecovery();
 
     if (isViewerProfileUrl(parseUrl(window.location.href))) {
       const enableViewerPageStyles = () => {
