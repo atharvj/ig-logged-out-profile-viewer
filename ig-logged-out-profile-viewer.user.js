@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG Logged-Out Profile Viewer
 // @namespace    https://github.com/atharvj/ig-to-imginn-viewer
-// @version      0.5.4
+// @version      0.5.5
 // @description  Opens public Instagram links in Imginn only when logged out, and shows Imginn posts in a popup without losing your place.
 // @author       Intellectual07
 // @license      MIT
@@ -23,7 +23,6 @@
   const MODAL_ID = "igiv-post-modal";
   const STYLE_ID = "igiv-style";
   const FRAME_STYLE_ID = "igiv-frame-style";
-  const RECOVERY_STATUS_ID = "igiv-recovery-status";
   const MODAL_OPEN_CLASS = "igiv-modal-open";
   const HIDDEN_CLASS = "igiv-hidden";
   const INSTAGRAM_STAY_PARAM = "igiv_stay";
@@ -38,10 +37,7 @@
     '[id*="google_ads"]',
     '[class*="adsbygoogle"]',
   ].join(", ");
-  const INSTAGRAM_LOGIN_CHECK_TIMEOUT_MS = 5000;
-  const INSTAGRAM_LOGIN_CHECK_INTERVAL_MS = 250;
-  const VIEWER_SERVER_ERROR_MAX_RETRIES = 2;
-  const VIEWER_SERVER_ERROR_RETRY_DELAY_MS = 900;
+  const VIEWER_SERVER_ERROR_MAX_RETRIES = 1;
 
   const LOGIN_PATH_RE = /^\/accounts\/login\/?$/;
   const INSTAGRAM_POST_PATH_RE = /^\/p\/([^/?#]+)\/?$/;
@@ -197,51 +193,6 @@
     return /(?:^|;\s*)(?:ds_user_id|sessionid)=/.test(document.cookie || "");
   }
 
-  function looksLoggedInToInstagram() {
-    if (hasReadableInstagramAuthCookie()) return true;
-    if (!document.body) return false;
-
-    return Boolean(
-      document.querySelector(
-        [
-          'a[href^="/direct"]',
-          'a[href*="/direct/inbox"]',
-          'a[href^="/accounts/activity"]',
-          'a[href^="/accounts/edit"]',
-          'a[href^="/accounts/logout"]',
-          '[aria-label="Home"]',
-          '[aria-label="Messenger"]',
-          '[aria-label="New post"]',
-        ].join(", ")
-      )
-    );
-  }
-
-  function looksLoggedOutToInstagram() {
-    if (!document.body) return false;
-
-    const usernameInput = document.querySelector('input[name="username"]');
-    const passwordInput = document.querySelector('input[name="password"]');
-    if (usernameInput && passwordInput) return true;
-
-    if (document.querySelector('form[action*="/accounts/login"]')) return true;
-
-    return Array.from(document.querySelectorAll('a[href*="/accounts/login"], button')).some((element) =>
-      /^(log in|sign up)$/i.test((element.textContent || "").trim())
-    );
-  }
-
-  function looksLikePrivateInstagramProfile() {
-    if (!document.body) return false;
-
-    const text = (document.body.innerText || "").replace(/\s+/g, " ");
-    if (!/this (?:account|profile) is private/i.test(text)) return false;
-
-    return Boolean(
-      document.querySelector('meta[property="og:image"][content], header img, main img, article img')
-    );
-  }
-
   function isInstagramStayUrl(url) {
     return Boolean(url && url.searchParams.get(INSTAGRAM_STAY_PARAM) === INSTAGRAM_STAY_VALUE);
   }
@@ -297,23 +248,6 @@
     console.info(`${SCRIPT_NAME}: redirected to ${viewerUrl}`);
   }
 
-  function maybeRedirectLoggedOutInstagram() {
-    const currentUrl = parseUrl(window.location.href);
-    if (!currentUrl || !isInstagramHost(currentUrl.hostname)) return "stay";
-    if (!imginnUrlForInstagramUrl(currentUrl)) return "stay";
-    if (looksLoggedInToInstagram()) return "stay";
-    if (looksLikePrivateInstagramProfile()) return "stay";
-
-    if (instagramUrlFromLoginRedirect(currentUrl) || looksLoggedOutToInstagram()) {
-      if (isProfilePath(currentUrl.pathname) && document.readyState === "loading") return "pending";
-
-      redirectInstagramToViewer();
-      return "redirected";
-    }
-
-    return "pending";
-  }
-
   function installInstagramLoggedOutRedirect() {
     const currentUrl = parseUrl(window.location.href);
     if (!currentUrl || !isInstagramHost(currentUrl.hostname)) return;
@@ -324,49 +258,7 @@
     if (!imginnUrlForInstagramUrl(currentUrl)) return;
     if (hasReadableInstagramAuthCookie()) return;
 
-    let completed = false;
-    let intervalId = 0;
-    let observer = null;
-    const startedAt = Date.now();
-
-    const cleanup = () => {
-      completed = true;
-      window.clearInterval(intervalId);
-      if (observer) observer.disconnect();
-    };
-
-    const check = () => {
-      if (completed) return;
-
-      const decision = maybeRedirectLoggedOutInstagram();
-      if (decision === "redirected" || decision === "stay") {
-        cleanup();
-        return;
-      }
-
-      if (Date.now() - startedAt >= INSTAGRAM_LOGIN_CHECK_TIMEOUT_MS) {
-        if (!looksLoggedInToInstagram()) {
-          cleanup();
-          redirectInstagramToViewer();
-          return;
-        }
-
-        cleanup();
-      }
-    };
-
-    intervalId = window.setInterval(check, INSTAGRAM_LOGIN_CHECK_INTERVAL_MS);
-
-    if (document.documentElement) {
-      observer = new MutationObserver(check);
-      observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-      });
-    }
-
-    document.addEventListener("DOMContentLoaded", check, { once: true });
-    check();
+    redirectInstagramToViewer();
   }
 
   function onReady(callback) {
@@ -421,33 +313,6 @@
     }
   }
 
-  function showViewerRecoveryStatus(message) {
-    if (!document.body) return;
-
-    let status = document.getElementById(RECOVERY_STATUS_ID);
-    if (!status) {
-      const bodyStyle = window.getComputedStyle(document.body);
-      status = document.createElement("div");
-      status.id = RECOVERY_STATUS_ID;
-      status.setAttribute("role", "status");
-      status.style.cssText = [
-        "align-items:center",
-        `background:${bodyStyle.backgroundColor === "rgba(0, 0, 0, 0)" ? "#fff" : bodyStyle.backgroundColor}`,
-        `color:${bodyStyle.color || "#111"}`,
-        "display:flex",
-        "font:600 14px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
-        "inset:0",
-        "justify-content:center",
-        "letter-spacing:0",
-        "position:fixed",
-        "z-index:2147483646",
-      ].join(";");
-      document.body.appendChild(status);
-    }
-
-    status.textContent = message;
-  }
-
   function instagramProfileFallbackUrl(username) {
     const url = new URL(`/${cleanPathPart(username)}/`, "https://www.instagram.com");
     url.searchParams.set(INSTAGRAM_STAY_PARAM, INSTAGRAM_STAY_VALUE);
@@ -474,7 +339,6 @@
 
       handled = true;
       stopObserving();
-      showViewerRecoveryStatus("Opening the Instagram profile...");
       const fallbackUrl = instagramProfileFallbackUrl(username);
       window.location.replace(fallbackUrl);
       console.info(`${SCRIPT_NAME}: Imginn could not show @${username}; opening the Instagram profile instead.`);
@@ -495,13 +359,9 @@
       const retryUrl = new URL(currentUrl.href);
       retryUrl.searchParams.set(VIEWER_RETRY_PARAM, String(retryCount + 1));
       retryUrl.searchParams.set(VIEWER_CACHE_BUST_PARAM, Date.now().toString(36));
-      const delay = VIEWER_SERVER_ERROR_RETRY_DELAY_MS * 2 ** retryCount;
-      showViewerRecoveryStatus(`Retrying profile... (${retryCount + 1}/${VIEWER_SERVER_ERROR_MAX_RETRIES})`);
 
-      window.setTimeout(() => {
-        window.stop();
-        window.location.replace(retryUrl.href);
-      }, delay);
+      window.stop();
+      window.location.replace(retryUrl.href);
 
       console.info(`${SCRIPT_NAME}: Imginn server error for @${username}; retrying (${retryCount + 1}/${VIEWER_SERVER_ERROR_MAX_RETRIES}).`);
     };
