@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG Logged-Out Profile Viewer
 // @namespace    https://github.com/atharvj/ig-to-imginn-viewer
-// @version      0.5.5
+// @version      0.5.6
 // @description  Opens public Instagram links in Imginn only when logged out, and shows Imginn posts in a popup without losing your place.
 // @author       Intellectual07
 // @license      MIT
@@ -27,8 +27,7 @@
   const HIDDEN_CLASS = "igiv-hidden";
   const INSTAGRAM_STAY_PARAM = "igiv_stay";
   const INSTAGRAM_STAY_VALUE = "1";
-  const VIEWER_RETRY_PARAM = "igiv_retry";
-  const VIEWER_CACHE_BUST_PARAM = "igiv_bust";
+  const VIEWER_PROFILE_LOAD_TIMEOUT_MS = 2500;
   const VIEWER_AD_SELECTOR = [
     "ins.adsbygoogle",
     'iframe[id^="aswift_"]',
@@ -37,8 +36,6 @@
     '[id*="google_ads"]',
     '[class*="adsbygoogle"]',
   ].join(", ");
-  const VIEWER_SERVER_ERROR_MAX_RETRIES = 1;
-
   const LOGIN_PATH_RE = /^\/accounts\/login\/?$/;
   const INSTAGRAM_POST_PATH_RE = /^\/p\/([^/?#]+)\/?$/;
   const INSTAGRAM_REEL_PATH_RE = /^\/reel\/([^/?#]+)\/?$/;
@@ -291,26 +288,7 @@
 
   function hasViewerProfileContent() {
     const page = document.querySelector(".page-user");
-    return Boolean(page && page.querySelector(".userinfo, .tabs, .items"));
-  }
-
-  function viewerRetryCount(url) {
-    const value = Number.parseInt(url.searchParams.get(VIEWER_RETRY_PARAM) || "0", 10);
-    return Number.isFinite(value) && value > 0 ? value : 0;
-  }
-
-  function cleanViewerRecoveryParams(url) {
-    if (!url.searchParams.has(VIEWER_RETRY_PARAM) && !url.searchParams.has(VIEWER_CACHE_BUST_PARAM)) return;
-
-    const cleanUrl = new URL(url.href);
-    cleanUrl.searchParams.delete(VIEWER_RETRY_PARAM);
-    cleanUrl.searchParams.delete(VIEWER_CACHE_BUST_PARAM);
-
-    try {
-      window.history.replaceState(window.history.state, "", cleanUrl.href);
-    } catch (_) {
-      // Recovery parameters are harmless if Imginn blocks history changes.
-    }
+    return Boolean(page && page.querySelector(".userinfo") && page.querySelector(".tabs"));
   }
 
   function instagramProfileFallbackUrl(username) {
@@ -328,49 +306,31 @@
 
     let handled = false;
     let observer = null;
+    let fallbackTimer = 0;
 
-    const stopObserving = () => {
+    const stopWatching = () => {
       if (observer) observer.disconnect();
       observer = null;
+      window.clearTimeout(fallbackTimer);
+      fallbackTimer = 0;
     };
 
     const openInstagramFallback = () => {
       if (handled) return;
 
       handled = true;
-      stopObserving();
+      stopWatching();
       const fallbackUrl = instagramProfileFallbackUrl(username);
+      window.stop();
       window.location.replace(fallbackUrl);
       console.info(`${SCRIPT_NAME}: Imginn could not show @${username}; opening the Instagram profile instead.`);
-    };
-
-    const retryServerError = () => {
-      if (handled) return;
-
-      const retryCount = viewerRetryCount(currentUrl);
-      if (retryCount >= VIEWER_SERVER_ERROR_MAX_RETRIES) {
-        openInstagramFallback();
-        return;
-      }
-
-      handled = true;
-      stopObserving();
-
-      const retryUrl = new URL(currentUrl.href);
-      retryUrl.searchParams.set(VIEWER_RETRY_PARAM, String(retryCount + 1));
-      retryUrl.searchParams.set(VIEWER_CACHE_BUST_PARAM, Date.now().toString(36));
-
-      window.stop();
-      window.location.replace(retryUrl.href);
-
-      console.info(`${SCRIPT_NAME}: Imginn server error for @${username}; retrying (${retryCount + 1}/${VIEWER_SERVER_ERROR_MAX_RETRIES}).`);
     };
 
     const check = () => {
       if (handled) return;
 
       if (isViewerServerErrorPage()) {
-        retryServerError();
+        openInstagramFallback();
         return;
       }
 
@@ -381,8 +341,7 @@
 
       if (hasViewerProfileContent()) {
         handled = true;
-        stopObserving();
-        cleanViewerRecoveryParams(currentUrl);
+        stopWatching();
       }
     };
 
@@ -397,6 +356,7 @@
       });
     };
 
+    fallbackTimer = window.setTimeout(openInstagramFallback, VIEWER_PROFILE_LOAD_TIMEOUT_MS);
     onReady(start);
     window.addEventListener("load", check, { once: true });
   }
