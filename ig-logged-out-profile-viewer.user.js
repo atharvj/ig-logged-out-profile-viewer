@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG Logged-Out Profile Viewer
 // @namespace    https://github.com/atharvj/ig-to-imginn-viewer
-// @version      0.5.6
+// @version      0.5.7
 // @description  Opens public Instagram links in Imginn only when logged out, and shows Imginn posts in a popup without losing your place.
 // @author       Intellectual07
 // @license      MIT
@@ -27,7 +27,7 @@
   const HIDDEN_CLASS = "igiv-hidden";
   const INSTAGRAM_STAY_PARAM = "igiv_stay";
   const INSTAGRAM_STAY_VALUE = "1";
-  const VIEWER_PROFILE_LOAD_TIMEOUT_MS = 2500;
+  const VIEWER_PROFILE_LOAD_TIMEOUT_MS = 5000;
   const VIEWER_AD_SELECTOR = [
     "ins.adsbygoogle",
     'iframe[id^="aswift_"]',
@@ -307,6 +307,7 @@
     let handled = false;
     let observer = null;
     let fallbackTimer = 0;
+    let deadline = performance.now() + VIEWER_PROFILE_LOAD_TIMEOUT_MS;
 
     const stopWatching = () => {
       if (observer) observer.disconnect();
@@ -329,6 +330,14 @@
     const check = () => {
       if (handled) return;
 
+      const verificationWidget = Array.from(document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]'))
+        .some((frame) => frame.getBoundingClientRect().height > 0);
+      if (isCloudflareChallengeFrame(document) || verificationWidget) {
+        // Verification needs user input; allow a fresh loading window after it ends.
+        deadline = performance.now() + VIEWER_PROFILE_LOAD_TIMEOUT_MS;
+        return;
+      }
+
       if (isViewerServerErrorPage()) {
         openInstagramFallback();
         return;
@@ -342,7 +351,10 @@
       if (hasViewerProfileContent()) {
         handled = true;
         stopWatching();
+        return;
       }
+
+      if (performance.now() >= deadline) openInstagramFallback();
     };
 
     const start = () => {
@@ -356,7 +368,12 @@
       });
     };
 
-    fallbackTimer = window.setTimeout(openInstagramFallback, VIEWER_PROFILE_LOAD_TIMEOUT_MS);
+    const tick = () => {
+      check();
+      if (!handled) fallbackTimer = window.setTimeout(tick, 250);
+    };
+
+    tick();
     onReady(start);
     window.addEventListener("load", check, { once: true });
   }
