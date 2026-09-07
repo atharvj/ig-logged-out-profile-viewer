@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG Logged-Out Profile Viewer
 // @namespace    https://github.com/atharvj/ig-to-imginn-viewer
-// @version      0.5.7
+// @version      0.5.8
 // @description  Opens public Instagram links in Imginn only when logged out, and shows Imginn posts in a popup without losing your place.
 // @author       Intellectual07
 // @license      MIT
@@ -36,6 +36,7 @@
     '[id*="google_ads"]',
     '[class*="adsbygoogle"]',
   ].join(", ");
+  const POST_AD_SELECTOR = `${VIEWER_AD_SELECTOR}, .block-sulvo, .block-money, .demand-supply__display`;
   const LOGIN_PATH_RE = /^\/accounts\/login\/?$/;
   const INSTAGRAM_POST_PATH_RE = /^\/p\/([^/?#]+)\/?$/;
   const INSTAGRAM_REEL_PATH_RE = /^\/reel\/([^/?#]+)\/?$/;
@@ -191,7 +192,11 @@
   }
 
   function isInstagramStayUrl(url) {
-    return Boolean(url && url.searchParams.get(INSTAGRAM_STAY_PARAM) === INSTAGRAM_STAY_VALUE);
+    if (!url) return false;
+    if (url.searchParams.get(INSTAGRAM_STAY_PARAM) === INSTAGRAM_STAY_VALUE) return true;
+
+    const loginTarget = instagramUrlFromLoginRedirect(url);
+    return Boolean(loginTarget && loginTarget.searchParams.get(INSTAGRAM_STAY_PARAM) === INSTAGRAM_STAY_VALUE);
   }
 
   function removeInstagramStayMarker(url) {
@@ -291,6 +296,18 @@
     return Boolean(page && page.querySelector(".userinfo") && page.querySelector(".tabs"));
   }
 
+  function isViewerPrivateProfile() {
+    const page = document.querySelector(".page-user, .page-error");
+    if (!page) return false;
+    if (page.matches('[data-is-private="true"]')) return true;
+
+    return [page, ...page.querySelectorAll("p, div, span, h1, h2, h3")].some((element) => {
+      if (element.closest(".userinfo, .item, article, .tabs")) return false;
+      const text = normalizedText(element);
+      return text.length < 180 && /^(?:(?:this|the) (?:account|profile) is private|you (?:visit|are visiting) a private (?:account|profile)|private (?:account|profile))(?:[.!:\s]|$)/i.test(text);
+    });
+  }
+
   function instagramProfileFallbackUrl(username) {
     const url = new URL(`/${cleanPathPart(username)}/`, "https://www.instagram.com");
     url.searchParams.set(INSTAGRAM_STAY_PARAM, INSTAGRAM_STAY_VALUE);
@@ -308,6 +325,7 @@
     let observer = null;
     let fallbackTimer = 0;
     let deadline = performance.now() + VIEWER_PROFILE_LOAD_TIMEOUT_MS;
+    let profileLoaded = false;
 
     const stopWatching = () => {
       if (observer) observer.disconnect();
@@ -330,6 +348,12 @@
     const check = () => {
       if (handled) return;
 
+      if (isViewerPrivateProfile()) {
+        openInstagramFallback();
+        return;
+      }
+      if (profileLoaded) return;
+
       const verificationWidget = Array.from(document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]'))
         .some((frame) => frame.getBoundingClientRect().height > 0);
       if (isCloudflareChallengeFrame(document) || verificationWidget) {
@@ -349,8 +373,10 @@
       }
 
       if (hasViewerProfileContent()) {
-        handled = true;
-        stopWatching();
+        // Private-account notices can arrive after the profile header.
+        profileLoaded = true;
+        window.clearTimeout(fallbackTimer);
+        fallbackTimer = 0;
         return;
       }
 
@@ -365,12 +391,13 @@
       observer.observe(document.body, {
         childList: true,
         subtree: true,
+        characterData: true,
       });
     };
 
     const tick = () => {
       check();
-      if (!handled) fallbackTimer = window.setTimeout(tick, 250);
+      if (!handled && !profileLoaded) fallbackTimer = window.setTimeout(tick, 250);
     };
 
     tick();
@@ -421,6 +448,10 @@
 
       html[data-igiv-viewer-page="true"] .page-user > .tabs {
         margin-bottom: 0 !important;
+      }
+
+      [data-igiv-story-control="true"] {
+        cursor: pointer !important;
       }
 
       html[data-igiv-viewer-page="true"] [data-igiv-gap-block="true"] {
@@ -1071,6 +1102,87 @@
     return /^\/stories\/[A-Za-z0-9._]{1,30}\/?$/.test(pathname);
   }
 
+  function installStoryFallback() {
+    if (!isViewerStoriesPath(window.location.pathname)) return;
+
+    const username = currentViewerProfileUsername();
+    if (!username) return;
+    let timer = 0;
+
+    const visibleStorySources = () => new Set(
+      Array.from(document.querySelectorAll("img, video")).filter((media) => {
+        if (media.closest(".userinfo, .tabs")) return false;
+        const rect = visibleRect(media);
+        if (!rect || rect.width < 160 || rect.height < 160) return false;
+        return media.tagName === "IMG" ? media.complete && media.naturalWidth > 0 : media.readyState > 0;
+      }).map((media) => media.currentSrc || media.src).filter(Boolean)
+    );
+
+    const markControls = () => {
+      const page = document.querySelector(".page-user");
+      if (!page) return;
+
+      for (const label of page.querySelectorAll("a, button, div, span, p")) {
+        if (!/^stories$/i.test(normalizedText(label)) || label.closest(".tabs, .userinfo")) continue;
+
+        let control = label;
+        while (control && control !== page && !control.querySelector("img")) control = control.parentElement;
+        if (!control || control === page || control.querySelector(".tabs") || control.querySelectorAll("img").length !== 1) continue;
+        if (control.dataset.igivStoryControl === "true") continue;
+
+        control.dataset.igivStoryControl = "true";
+        if (!control.matches("a[href], button")) {
+          control.tabIndex = 0;
+          control.setAttribute("role", "button");
+          control.addEventListener("keydown", (event) => {
+            if (event.target === control && (event.key === "Enter" || event.key === " ")) {
+              event.preventDefault();
+              control.click();
+            }
+          });
+        }
+      }
+    };
+
+    document.addEventListener("click", (event) => {
+      if (event.button !== 0 || isModifiedClick(event)) return;
+      const control = event.target.closest && event.target.closest('[data-igiv-story-control="true"]');
+      if (!control) return;
+
+      // Give Imginn's own handler a chance to open available story media.
+      const originalSources = visibleStorySources();
+      const originalUrl = new URL(window.location.href);
+      originalUrl.hash = "";
+      let deadline = performance.now() + VIEWER_PROFILE_LOAD_TIMEOUT_MS;
+      window.clearTimeout(timer);
+
+      const check = () => {
+        const currentUrl = new URL(window.location.href);
+        currentUrl.hash = "";
+        if (currentUrl.href !== originalUrl.href) return;
+        if (Array.from(visibleStorySources()).some((src) => !originalSources.has(src))) return;
+        const widget = Array.from(document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]')).some(visibleRect);
+        if (isCloudflareChallengeFrame(document) || widget) {
+          deadline = performance.now() + VIEWER_PROFILE_LOAD_TIMEOUT_MS;
+        } else if (performance.now() >= deadline) {
+          const url = new URL(`/stories/${cleanPathPart(username)}/`, "https://www.instagram.com");
+          url.searchParams.set(INSTAGRAM_STAY_PARAM, INSTAGRAM_STAY_VALUE);
+          window.location.assign(url.href);
+          return;
+        }
+        timer = window.setTimeout(check, 250);
+      };
+      timer = window.setTimeout(check, 250);
+    }, true);
+
+    onReady(() => {
+      markControls();
+      const observer = new MutationObserver(markControls);
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
+    window.addEventListener("pagehide", () => window.clearTimeout(timer));
+  }
+
   function lowestCommonElementAncestor(first, second, boundary) {
     const ancestors = new Set();
 
@@ -1479,6 +1591,8 @@
         header,
         nav,
         [role="banner"],
+        ${POST_AD_SELECTOR},
+        [data-igiv-post-spacer="true"],
         .${HIDDEN_CLASS} {
           display: none !important;
           height: 0 !important;
@@ -1491,11 +1605,17 @@
         a {
           cursor: pointer !important;
         }
+
+        [data-igiv-media-start="true"] {
+          margin-top: 0 !important;
+          padding-top: 0 !important;
+        }
       `;
       (frameDocument.head || frameDocument.documentElement).appendChild(style);
     }
 
     hideFrameChrome(frameDocument);
+    installPostGapCleanup(frameDocument);
 
     if (frameDocument.documentElement.dataset.igivClickHandler !== "true") {
       frameDocument.documentElement.dataset.igivClickHandler = "true";
@@ -1526,6 +1646,71 @@
         true
       );
     }
+  }
+
+  function installPostGapCleanup(frameDocument) {
+    if (frameDocument.documentElement.dataset.igivPostCleanup === "true") return;
+    frameDocument.documentElement.dataset.igivPostCleanup = "true";
+
+    const isEmptyWrapper = (element) => {
+      const copy = element.cloneNode(true);
+      copy.querySelectorAll(`${POST_AD_SELECTOR}, script, style, [data-igiv-post-spacer="true"]`).forEach((node) => node.remove());
+      const contentSelector = "img, video, picture, audio, iframe, input, button, a, canvas, svg, form, [role], [tabindex], .swiper-button-prev, .swiper-button-next, .swiper-pagination";
+      return !copy.matches(contentSelector) && !normalizedText(copy) && !copy.querySelector(contentSelector);
+    };
+    const markSpacer = (element) => {
+      if (element.dataset.igivPostSpacer !== "true") element.dataset.igivPostSpacer = "true";
+    };
+
+    const cleanup = () => {
+      for (const spacer of Array.from(frameDocument.querySelectorAll('[data-igiv-post-spacer="true"]')).reverse()) {
+        if (!spacer.matches(POST_AD_SELECTOR) && !isEmptyWrapper(spacer)) delete spacer.dataset.igivPostSpacer;
+      }
+
+      for (const ad of frameDocument.querySelectorAll(POST_AD_SELECTOR)) {
+        markSpacer(ad);
+        for (let parent = ad.parentElement; parent && parent !== frameDocument.body; parent = parent.parentElement) {
+          if (!isEmptyWrapper(parent)) break;
+          markSpacer(parent);
+        }
+      }
+
+      const post = frameDocument.querySelector(".page-post, .page-single, .page-media");
+      if (!post) return;
+      const media = Array.from(post.querySelectorAll("img, video")).find((element) => {
+        if (element.closest(".userinfo")) return false;
+        const rect = frameVisibleRect(element);
+        return rect && rect.width >= 200 && rect.height >= 200;
+      });
+      if (!media) return;
+
+      // Collapse only empty siblings leading to the media, preserving author and carousel controls.
+      for (let branch = media; branch && branch !== post; branch = branch.parentElement) {
+        for (let sibling = branch.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+          if (sibling.matches("script, style")) continue;
+          if (!isEmptyWrapper(sibling)) break;
+          markSpacer(sibling);
+        }
+        if (branch.dataset.igivMediaStart !== "true") branch.dataset.igivMediaStart = "true";
+      }
+    };
+
+    cleanup();
+    const view = frameDocument.defaultView;
+    let queued = false;
+    const schedule = () => {
+      if (queued || !view) return;
+      queued = true;
+      view.requestAnimationFrame(() => {
+        queued = false;
+        cleanup();
+      });
+    };
+    const observer = new MutationObserver(schedule);
+    observer.observe(frameDocument.body, { childList: true, subtree: true });
+    frameDocument.addEventListener("load", schedule, true);
+    if (view) view.addEventListener("resize", schedule, { passive: true });
+    if (view) view.addEventListener("pagehide", () => observer.disconnect(), { once: true });
   }
 
   function handleViewerClick(event) {
@@ -1626,6 +1811,7 @@
     document.addEventListener("click", handleViewerClick, true);
     document.addEventListener("keydown", handleKeydown, true);
     installViewerProfileRecovery();
+    installStoryFallback();
 
     if (isViewerProfileUrl(parseUrl(window.location.href))) {
       const enableViewerPageStyles = () => {
