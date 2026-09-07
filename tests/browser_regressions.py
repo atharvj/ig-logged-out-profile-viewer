@@ -33,8 +33,7 @@ def post():
 body {{ margin:0; font:14px sans-serif; }} header {{ height:90px; }}
 .page-post {{ max-width:650px; margin:auto; }} .userinfo {{ height:80px; }}
 .co-creators {{ height:50px; }} .wrapper {{ min-height:750px; }}
-.block-sulvo {{ height:700px; }} .blank {{ height:330px; }}
-.media {{ margin-top:160px; padding-top:100px; }}
+.block-sulvo {{ height:700px; }}
 .media img {{ display:block; width:100%; height:360px; background:#329b94; }}
 .carousel-controls {{ height:32px; }}
 </style></head><body><header>Imginn Search Users</header><main class="page-post">
@@ -67,6 +66,7 @@ class BrowserRegressions(unittest.TestCase):
         self.page = self.context.new_page()
         self.errors = []
         self.requests = []
+        self.video_bytes = None
         self.page.on('pageerror', lambda error: self.errors.append(str(error)))
         self.documents = {'/kingjames/': profile()}
         self.context.route('**/*', self.route)
@@ -78,6 +78,8 @@ class BrowserRegressions(unittest.TestCase):
             route.fulfill(content_type='text/html', body='<main id="instagram">Instagram</main>')
         elif url.hostname == 'imginn.com' and url.path in self.documents:
             route.fulfill(content_type='text/html', body=self.documents[url.path])
+        elif url.hostname == 'scontent-test.cdninstagram.com' and self.video_bytes:
+            route.fulfill(content_type='video/webm', body=self.video_bytes)
         else:
             route.abort()
 
@@ -123,13 +125,16 @@ class BrowserRegressions(unittest.TestCase):
             }};</script>'''
         return profile(f'<div class="stories"><a id="story" href="#"><img src="{PIXEL}" width="70" height="70"><span>Stories</span></a></div>', script)
 
-    def test_dead_story_circle_falls_back_on_click(self):
+    def test_dead_story_circle_stays_with_optional_profile_link(self):
         self.documents['/stories/kingjames/'] = self.story_document()
         self.open_profile('/stories/kingjames/')
         self.page.wait_for_selector('[data-igiv-story-control]')
         self.page.locator('#story').click()
-        self.page.wait_for_selector('#instagram', timeout=6500)
-        self.assertEqual(self.page.url, 'https://www.instagram.com/stories/kingjames/')
+        self.page.wait_for_selector('[data-igiv-story-status]', timeout=6500)
+        self.assertIn('imginn.com/stories/kingjames/', self.page.url)
+        self.page.locator('[data-igiv-story-status] a').click()
+        self.page.wait_for_selector('#instagram')
+        self.assertEqual(self.page.url, 'https://www.instagram.com/kingjames/')
 
     def test_working_native_story_does_not_fall_back(self):
         self.documents['/stories/kingjames/'] = self.story_document(native=True)
@@ -152,7 +157,8 @@ class BrowserRegressions(unittest.TestCase):
         self.page.evaluate("() => document.querySelector('#challenge-running').remove()")
         self.page.wait_for_timeout(2800)
         self.assertIn('imginn.com', self.page.url)
-        self.page.wait_for_selector('#instagram', timeout=3500)
+        self.page.wait_for_selector('[data-igiv-story-status]', timeout=3500)
+        self.assertIn('imginn.com', self.page.url)
 
     def test_popup_gap_and_dynamic_ads_desktop_mobile(self):
         for width, kind in [(1280, 'p'), (390, 'reel')]:
@@ -191,6 +197,90 @@ class BrowserRegressions(unittest.TestCase):
         self.page.wait_for_selector('#instagram')
         self.assertTrue(self.page.url.startswith('https://www.instagram.com/accounts/login/'))
         self.assertFalse(any('imginn.com' in url for url in self.requests))
+
+    def test_popup_preserves_padding_sized_carousel(self):
+        self.documents['/kingjames/'] = profile(f'<a id="post" href="/p/code/"><img src="{PIXEL}" width="220" height="300"></a>')
+        self.documents['/p/code/'] = f'''<html><head><style>
+          .page-post {{ width:90%;margin:auto }}
+          .swiper-slide {{ position:relative;height:0;padding-top:80%;overflow:hidden }}
+          .swiper-slide img {{ position:absolute;inset:0;width:100%;height:100%;background:rgb(30,160,110) }}
+          </style></head><body><main class="page-post"><div class="userinfo">Author</div>
+          <div class="block-money" style="height:700px"></div>
+          <div class="swiper-slide"><img id="real-media" src="{PIXEL}"></div></main></body></html>'''
+        self.open_profile()
+        self.page.locator('#post').click()
+        frame = self.page.frame_locator('#igiv-post-modal iframe')
+        frame.locator('#real-media').wait_for(state='attached')
+        self.page.wait_for_timeout(400)
+        self.assertGreater(frame.locator('.swiper-slide').evaluate('(e) => e.getBoundingClientRect().height'), 200)
+        self.assertTrue(frame.locator('#real-media').is_visible())
+        for width in (1280, 390):
+            self.page.set_viewport_size({'width': width, 'height': 850})
+            self.page.wait_for_timeout(200)
+            self.assertGreater(frame.locator('.swiper-slide').evaluate('(e) => e.getBoundingClientRect().height'), 200)
+            self.assertTrue(frame.locator('#real-media').is_visible())
+            self.page.screenshot(path=str(Path(tempfile.gettempdir()) / f'igiv-carousel-{width}.png'))
+
+    def test_story_highlight_error_stays_and_late_media_clears_notice(self):
+        self.documents['/stories/kingjames/'] = self.story_document().replace(
+            '</span></a></div>', f'</span></a><a id="highlight" href="#"><img src="{PIXEL}" width="70" height="70">Highlights</a></div>')
+        self.open_profile('/stories/kingjames/')
+        self.page.wait_for_selector('#highlight[data-igiv-story-control]')
+        self.page.locator('#highlight').click()
+        self.page.evaluate("() => { const p=document.createElement('p'); p.textContent='Server Error, Refresh later'; document.body.append(p); }")
+        self.page.wait_for_selector('[data-igiv-story-status]', timeout=6500)
+        self.assertIn('imginn.com', self.page.url)
+        self.page.evaluate(f"() => {{ const img=new Image(); img.src='{PIXEL}'; img.style.cssText='width:300px;height:500px'; document.body.append(img); }}")
+        self.page.locator('[data-igiv-story-status]').wait_for(state='detached')
+
+    def test_cdn_video_play_stays_inline_on_story_page_and_popup(self):
+        media_url = 'https://scontent-test.cdninstagram.com/story.mp4?token=a%2Bb&oh=signature'
+        links = f'<a id="play" href="{media_url}">Play</a><a id="download" href="{media_url}" download>Download</a>'
+        for framed in (False, True):
+            with self.subTest(framed=framed):
+                if framed:
+                    self.documents['/kingjames/'] = profile(f'<a id="post" href="/p/code/"><img src="{PIXEL}" width="220" height="300"></a>')
+                    self.documents['/p/code/'] = f'<html><body><main class="page-post">{links}</main></body></html>'
+                    self.open_profile()
+                    self.page.locator('#post').click()
+                    scope = self.page.frame_locator('#igiv-post-modal iframe')
+                else:
+                    self.documents['/stories/kingjames/'] = profile(links)
+                    self.open_profile('/stories/kingjames/')
+                    scope = self.page
+                scope.locator('#play').wait_for()
+                if framed:
+                    scope.locator('html[data-igiv-click-handler="true"]').wait_for(state='attached')
+                original_url = self.page.url
+                scope.locator('#play').click()
+                video = scope.locator('[data-igiv-video-player] video')
+                video.wait_for()
+                self.assertEqual(video.get_attribute('src'), media_url)
+                self.assertTrue(video.evaluate('(e) => e.controls && e.playsInline'))
+                # All external media requests are blocked by the fixture router.
+                scope.locator('[data-igiv-video-player] [role="status"]').wait_for()
+                self.assertEqual(self.page.url, original_url)
+                self.assertEqual(scope.locator('#download').get_attribute('href'), media_url)
+                self.assertTrue(scope.locator('#download').is_visible())
+
+    def test_linked_video_actually_plays_without_navigation(self):
+        self.video_bytes = bytes(self.page.evaluate('''async () => {
+          const canvas = document.createElement('canvas'); canvas.width=160; canvas.height=240;
+          const ctx = canvas.getContext('2d'); ctx.fillStyle='#159c79'; ctx.fillRect(0,0,160,240);
+          const stream=canvas.captureStream(10); const recorder=new MediaRecorder(stream, {mimeType:'video/webm'});
+          const chunks=[]; recorder.ondataavailable=e=>chunks.push(e.data);
+          const done=new Promise(resolve=>recorder.onstop=resolve);
+          recorder.start(); await new Promise(resolve=>setTimeout(resolve,400)); recorder.stop(); await done;
+          stream.getTracks().forEach(track=>track.stop());
+          return Array.from(new Uint8Array(await new Blob(chunks).arrayBuffer()));
+        }'''))
+        self.documents['/stories/kingjames/'] = profile('<a id="play" href="https://scontent-test.cdninstagram.com/story.webm?token=unchanged">Play</a>')
+        self.open_profile('/stories/kingjames/')
+        self.page.locator('#play').click()
+        self.page.wait_for_function('document.querySelector("video")?.currentTime > 0')
+        self.assertIn('imginn.com/stories/kingjames/', self.page.url)
+        self.assertTrue(self.page.locator('video').is_visible())
+        self.assertTrue(self.page.locator('[data-igiv-video-player] [role="status"]').is_hidden())
 
     def test_server_error_and_loading_timeout(self):
         self.documents['/kingjames/'] = '<html><body>Server error, please try again later.</body></html>'

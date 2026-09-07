@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG Logged-Out Profile Viewer
 // @namespace    https://github.com/atharvj/ig-to-imginn-viewer
-// @version      0.5.8
+// @version      0.5.9
 // @description  Opens public Instagram links in Imginn only when logged out, and shows Imginn posts in a popup without losing your place.
 // @author       Intellectual07
 // @license      MIT
@@ -1108,6 +1108,8 @@
     const username = currentViewerProfileUsername();
     if (!username) return;
     let timer = 0;
+    let notice = null;
+    let originalSources = new Set();
 
     const visibleStorySources = () => new Set(
       Array.from(document.querySelectorAll("img, video")).filter((media) => {
@@ -1128,18 +1130,21 @@
         let control = label;
         while (control && control !== page && !control.querySelector("img")) control = control.parentElement;
         if (!control || control === page || control.querySelector(".tabs") || control.querySelectorAll("img").length !== 1) continue;
-        if (control.dataset.igivStoryControl === "true") continue;
-
-        control.dataset.igivStoryControl = "true";
-        if (!control.matches("a[href], button")) {
-          control.tabIndex = 0;
-          control.setAttribute("role", "button");
-          control.addEventListener("keydown", (event) => {
-            if (event.target === control && (event.key === "Enter" || event.key === " ")) {
-              event.preventDefault();
-              control.click();
-            }
-          });
+        // Highlight circles share the current-Stories control's parent.
+        for (const item of control.parentElement.children) {
+          if (item.querySelectorAll("img").length !== 1 || item.querySelector(".tabs, .userinfo") ||
+              normalizedText(item).length > 80 || item.dataset.igivStoryControl === "true") continue;
+          item.dataset.igivStoryControl = "true";
+          if (!item.matches("a[href], button")) {
+            item.tabIndex = 0;
+            item.setAttribute("role", "button");
+            item.addEventListener("keydown", (event) => {
+              if (event.target === item && (event.key === "Enter" || event.key === " ")) {
+                event.preventDefault();
+                item.click();
+              }
+            });
+          }
         }
       }
     };
@@ -1150,7 +1155,9 @@
       if (!control) return;
 
       // Give Imginn's own handler a chance to open available story media.
-      const originalSources = visibleStorySources();
+      originalSources = visibleStorySources();
+      if (notice) notice.remove();
+      notice = null;
       const originalUrl = new URL(window.location.href);
       originalUrl.hash = "";
       let deadline = performance.now() + VIEWER_PROFILE_LOAD_TIMEOUT_MS;
@@ -1165,9 +1172,15 @@
         if (isCloudflareChallengeFrame(document) || widget) {
           deadline = performance.now() + VIEWER_PROFILE_LOAD_TIMEOUT_MS;
         } else if (performance.now() >= deadline) {
-          const url = new URL(`/stories/${cleanPathPart(username)}/`, "https://www.instagram.com");
-          url.searchParams.set(INSTAGRAM_STAY_PARAM, INSTAGRAM_STAY_VALUE);
-          window.location.assign(url.href);
+          notice = document.createElement("p");
+          notice.dataset.igivStoryStatus = "true";
+          notice.setAttribute("role", "status");
+          notice.textContent = "Imginn has not supplied this story or highlight. ";
+          const link = document.createElement("a");
+          link.href = instagramProfileFallbackUrl(username);
+          link.textContent = "Open Instagram profile";
+          notice.append(link);
+          control.parentElement.after(notice);
           return;
         }
         timer = window.setTimeout(check, 250);
@@ -1177,8 +1190,21 @@
 
     onReady(() => {
       markControls();
-      const observer = new MutationObserver(markControls);
+      const observer = new MutationObserver(() => {
+        markControls();
+        if (notice && Array.from(visibleStorySources()).some((src) => !originalSources.has(src))) {
+          notice.remove();
+          notice = null;
+        }
+      });
       observer.observe(document.body, { childList: true, subtree: true });
+      document.addEventListener("load", () => {
+        if (notice && Array.from(visibleStorySources()).some((src) => !originalSources.has(src))) {
+          notice.remove();
+          notice = null;
+        }
+      }, true);
+      window.addEventListener("pagehide", () => observer.disconnect(), { once: true });
     });
     window.addEventListener("pagehide", () => window.clearTimeout(timer));
   }
@@ -1605,11 +1631,6 @@
         a {
           cursor: pointer !important;
         }
-
-        [data-igiv-media-start="true"] {
-          margin-top: 0 !important;
-          padding-top: 0 !important;
-        }
       `;
       (frameDocument.head || frameDocument.documentElement).appendChild(style);
     }
@@ -1623,6 +1644,8 @@
       frameDocument.addEventListener(
         "click",
         (event) => {
+          if (event.defaultPrevented || event.button !== 0 || isModifiedClick(event)) return;
+          if (playLinkedVideo(event)) return;
           const link = closestAnchor(event.target);
           if (!link) return;
 
@@ -1655,8 +1678,12 @@
     const isEmptyWrapper = (element) => {
       const copy = element.cloneNode(true);
       copy.querySelectorAll(`${POST_AD_SELECTOR}, script, style, [data-igiv-post-spacer="true"]`).forEach((node) => node.remove());
-      const contentSelector = "img, video, picture, audio, iframe, input, button, a, canvas, svg, form, [role], [tabindex], .swiper-button-prev, .swiper-button-next, .swiper-pagination";
-      return !copy.matches(contentSelector) && !normalizedText(copy) && !copy.querySelector(contentSelector);
+      const contentSelector = "img, video, picture, audio, iframe, input, button, a, canvas, svg, form, [role], [tabindex], [data-src], [data-srcset], [class*='swiper'], [class*='slide'], [class*='media']";
+      if (copy.matches(contentSelector) || normalizedText(copy) || copy.querySelector(contentSelector)) return false;
+      // Background images and lazy placeholders are content even without child images.
+      return [element, ...element.querySelectorAll("*")].every((node) =>
+        node.matches(POST_AD_SELECTOR) || frameDocument.defaultView.getComputedStyle(node).backgroundImage === "none"
+      );
     };
     const markSpacer = (element) => {
       if (element.dataset.igivPostSpacer !== "true") element.dataset.igivPostSpacer = "true";
@@ -1673,25 +1700,6 @@
           if (!isEmptyWrapper(parent)) break;
           markSpacer(parent);
         }
-      }
-
-      const post = frameDocument.querySelector(".page-post, .page-single, .page-media");
-      if (!post) return;
-      const media = Array.from(post.querySelectorAll("img, video")).find((element) => {
-        if (element.closest(".userinfo")) return false;
-        const rect = frameVisibleRect(element);
-        return rect && rect.width >= 200 && rect.height >= 200;
-      });
-      if (!media) return;
-
-      // Collapse only empty siblings leading to the media, preserving author and carousel controls.
-      for (let branch = media; branch && branch !== post; branch = branch.parentElement) {
-        for (let sibling = branch.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
-          if (sibling.matches("script, style")) continue;
-          if (!isEmptyWrapper(sibling)) break;
-          markSpacer(sibling);
-        }
-        if (branch.dataset.igivMediaStart !== "true") branch.dataset.igivMediaStart = "true";
       }
     };
 
@@ -1715,6 +1723,7 @@
 
   function handleViewerClick(event) {
     if (event.defaultPrevented || event.button !== 0 || isModifiedClick(event)) return;
+    if (playLinkedVideo(event)) return;
 
     const link = closestAnchor(event.target);
     if (!link) return;
@@ -1725,6 +1734,41 @@
     event.preventDefault();
     event.stopImmediatePropagation();
     openPostModal(targetUrl, link);
+  }
+
+  function playLinkedVideo(event) {
+    const link = closestAnchor(event.target);
+    if (!link || link.hasAttribute("download") || /\bdownload\b/i.test(normalizedText(link))) return false;
+    const url = parseUrl(link.href);
+    if (!url || url.protocol !== "https:" ||
+        !(url.hostname === "cdninstagram.com" || url.hostname.endsWith(".cdninstagram.com")) ||
+        !/\.(mp4|webm)$/i.test(url.pathname)) return false;
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const doc = link.ownerDocument;
+    const container = doc.createElement("div");
+    container.dataset.igivVideoPlayer = "true";
+    const video = doc.createElement("video");
+    video.controls = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.src = url.href;
+    video.style.cssText = "display:block;width:100%;max-width:640px;max-height:80vh;aspect-ratio:9/16;object-fit:contain;background:#000";
+    const poster = link.querySelector("img");
+    if (poster) video.poster = poster.currentSrc || poster.src;
+    const status = doc.createElement("p");
+    status.setAttribute("role", "status");
+    status.hidden = true;
+    video.addEventListener("error", () => {
+      status.textContent = "This video could not load from Instagram's media server. Its link may have expired.";
+      status.hidden = false;
+    });
+    container.append(video, status);
+    link.replaceWith(container);
+    // Playback stays in this document; an expired media URL must never navigate the page.
+    video.play().catch(() => {});
+    return true;
   }
 
   function handleKeydown(event) {
