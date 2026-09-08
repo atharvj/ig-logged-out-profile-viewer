@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG Logged-Out Profile Viewer
 // @namespace    https://github.com/atharvj/ig-to-imginn-viewer
-// @version      0.5.10
+// @version      0.5.11
 // @description  Opens public Instagram links in Imginn only when logged out, and shows Imginn posts in a popup without losing your place.
 // @author       Intellectual07
 // @license      MIT
@@ -37,6 +37,7 @@
     '[class*="adsbygoogle"]',
   ].join(", ");
   const POST_AD_SELECTOR = `${VIEWER_AD_SELECTOR}, .block-sulvo, .block-money, .demand-supply__display, .demand-supply[data-ad]`;
+  const videoGuardDocuments = new WeakSet();
   const LOGIN_PATH_RE = /^\/accounts\/login\/?$/;
   const INSTAGRAM_POST_PATH_RE = /^\/p\/([^/?#]+)\/?$/;
   const INSTAGRAM_REEL_PATH_RE = /^\/reel\/([^/?#]+)\/?$/;
@@ -1599,6 +1600,7 @@
 
   function prepareFrameDocument(frameDocument, frameHref) {
     if (!frameDocument || !frameDocument.documentElement) return;
+    installVideoNavigationGuard(frameDocument);
 
     frameDocument.documentElement.dataset.igivFramed = "true";
 
@@ -1645,7 +1647,6 @@
         "click",
         (event) => {
           if (event.defaultPrevented || event.button !== 0 || isModifiedClick(event)) return;
-          if (playLinkedVideo(event)) return;
           const link = closestAnchor(event.target);
           if (!link) return;
 
@@ -1723,7 +1724,6 @@
 
   function handleViewerClick(event) {
     if (event.defaultPrevented || event.button !== 0 || isModifiedClick(event)) return;
-    if (playLinkedVideo(event)) return;
 
     const link = closestAnchor(event.target);
     if (!link) return;
@@ -1736,36 +1736,84 @@
     openPostModal(targetUrl, link);
   }
 
-  function playLinkedVideo(event) {
+  function linkedVideoTarget(event) {
+    if (isModifiedClick(event) || (event.button != null && event.button !== 0)) return null;
+    if (!event.target || typeof event.target.closest !== "function") return null;
     const link = closestAnchor(event.target);
-    if (!link || link.hasAttribute("download") || /\bdownload\b/i.test(normalizedText(link))) return false;
-    const url = parseUrl(link.href);
-    if (!url || url.protocol !== "https:" ||
-        !(url.hostname === "cdninstagram.com" || url.hostname.endsWith(".cdninstagram.com")) ||
-        !/\.(mp4|webm)$/i.test(url.pathname)) return false;
+    const overlay = event.target.closest(".play, button[aria-label='Play'], [role='button'][aria-label='Play']");
+    const explicitPlay = overlay || event.target.closest("video");
+    if (!explicitPlay && link && (link.hasAttribute("download") || /\bdownload\b/i.test(normalizedText(link)))) return null;
+    const mediaWrap = overlay && overlay.closest(".media-wrap, .story-media, .swiper-slide");
+    const existingVideo = (mediaWrap || link)?.querySelector("video");
+    const values = [link && link.href];
+    if (overlay) {
+      for (const element of [overlay, mediaWrap]) {
+        if (!element) continue;
+        for (const attr of ["data-src", "data-video-src", "data-video-url"]) values.push(element.getAttribute(attr));
+      }
+      if (existingVideo) values.push(existingVideo.currentSrc || existingVideo.src || existingVideo.querySelector("source[src]")?.src);
+    }
+    for (const value of values.filter(Boolean)) {
+      const url = parseUrl(value, event.target.ownerDocument.baseURI);
+      if (url && url.protocol === "https:" &&
+          (url.hostname === "cdninstagram.com" || url.hostname.endsWith(".cdninstagram.com")) &&
+          /\.(mp4|webm)$/i.test(url.pathname)) {
+        const matchingVideo = existingVideo && parseUrl(existingVideo.currentSrc || existingVideo.src || existingVideo.querySelector("source[src]")?.src, existingVideo.ownerDocument.baseURI)?.href === url.href;
+        return { source: link || overlay, existingVideo: matchingVideo ? existingVideo : null, url };
+      }
+    }
+    return null;
+  }
 
+  function installVideoNavigationGuard(doc) {
+    const view = doc.defaultView;
+    if (!view || videoGuardDocuments.has(doc)) return;
+    videoGuardDocuments.add(doc);
+    // Window capture runs before document/element handlers that may navigate to the CDN.
+    const stopEarlyNavigation = (event) => {
+      if (linkedVideoTarget(event)) event.stopImmediatePropagation();
+    };
+    for (const type of ["pointerdown", "mousedown", "touchstart"]) {
+      view.addEventListener(type, stopEarlyNavigation, { capture: true, passive: true });
+    }
+    view.addEventListener("click", (event) => {
+      const target = linkedVideoTarget(event);
+      if (target) playLinkedVideo(event, target);
+    }, true);
+  }
+
+  function playLinkedVideo(event, { source, existingVideo, url }) {
     event.preventDefault();
     event.stopImmediatePropagation();
-    const doc = link.ownerDocument;
+    const doc = source.ownerDocument;
     const container = doc.createElement("div");
     container.dataset.igivVideoPlayer = "true";
-    const video = doc.createElement("video");
+    const video = existingVideo || doc.createElement("video");
     video.controls = true;
     video.playsInline = true;
     video.preload = "metadata";
-    video.src = url.href;
-    video.style.cssText = "display:block;width:100%;max-width:640px;max-height:80vh;aspect-ratio:9/16;object-fit:contain;background:#000";
-    const poster = link.querySelector("img");
-    if (poster) video.poster = poster.currentSrc || poster.src;
+    if (!existingVideo) {
+      video.src = url.href;
+      video.style.cssText = "display:block;width:100%;max-width:640px;max-height:80vh;aspect-ratio:9/16;object-fit:contain;background:#000";
+      const poster = source.querySelector("img") || source.closest(".media-wrap")?.querySelector("img");
+      if (poster) video.poster = poster.currentSrc || poster.src;
+    }
     const status = doc.createElement("p");
     status.setAttribute("role", "status");
+    status.style.fontSize = "14px";
     status.hidden = true;
     video.addEventListener("error", () => {
       status.textContent = "This video could not load from Instagram's media server. Its link may have expired.";
       status.hidden = false;
     });
-    container.append(video, status);
-    link.replaceWith(container);
+    if (existingVideo && !source.contains(existingVideo)) {
+      (existingVideo.closest(".media-wrap") || existingVideo).after(status);
+      source.remove();
+    } else {
+      container.append(video, status);
+      // Replace the enclosing link as well, so native video controls cannot follow it.
+      (closestAnchor(source) || source).replaceWith(container);
+    }
     // Playback stays in this document; an expired media URL must never navigate the page.
     video.play().catch(() => {});
     return true;
@@ -1852,6 +1900,7 @@
   }
 
   function installViewerModal() {
+    installVideoNavigationGuard(document);
     document.addEventListener("click", handleViewerClick, true);
     document.addEventListener("keydown", handleKeydown, true);
     installViewerProfileRecovery();

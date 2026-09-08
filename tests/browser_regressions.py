@@ -339,6 +339,68 @@ class BrowserRegressions(unittest.TestCase):
         self.assertTrue(self.page.locator('video').is_visible())
         self.assertTrue(self.page.locator('[data-igiv-video-player] [role="status"]').is_hidden())
 
+    def test_story_play_overlay_and_early_site_handlers_cannot_navigate(self):
+        url = 'https://scontent-mia3-1.cdninstagram.com/story.mp4?token=a%2Bb&oh=keep'
+        cases = [
+            f'<div class="media-wrap" data-src="{url}"><button class="play" id="play">Play</button></div>',
+            f'<a id="play" href="{url}"><span>Play</span></a>',
+            f'<div class="media-wrap"><video src="{url}"></video><button class="play" id="play">Play</button></div>',
+            f'<a href="{url}" download><span id="play" class="play" role="button" tabindex="0">Play</span> Download</a>',
+        ]
+        for framed in (False, True):
+            for markup in cases:
+                with self.subTest(framed=framed, markup=markup[:80]):
+                    # A site's capture handler can otherwise navigate before our document handler.
+                    html = profile(markup, '''<script>
+                      for (const type of ['pointerdown', 'mousedown', 'touchstart', 'click']) {
+                        document.addEventListener(type, e => {
+                          if (e.target.closest('#play')) {
+                            window.siteNavigationAttempted = true;
+                            e.preventDefault();
+                          }
+                        }, true);
+                      }
+                    </script>''')
+                    if framed:
+                        self.documents['/kingjames/'] = profile(f'<a id="post" href="/p/code/"><img src="{PIXEL}" width="220" height="300"></a>')
+                        self.documents['/p/code/'] = html
+                        self.open_profile()
+                        self.page.locator('#post').click()
+                        scope = self.page.frame_locator('#igiv-post-modal iframe')
+                        scope.locator('html[data-igiv-click-handler="true"]').wait_for(state='attached')
+                    else:
+                        self.documents['/stories/kingjames/'] = html
+                        self.open_profile('/stories/kingjames/')
+                        scope = self.page
+                    scope.locator('#play').click()
+                    video = scope.locator('video')
+                    video.wait_for(timeout=1500)
+                    self.assertEqual(video.get_attribute('src'), url)
+                    self.assertTrue(video.evaluate('(e) => e.controls && e.playsInline'))
+                    self.assertFalse(video.evaluate('(e) => !!e.ownerDocument.defaultView.siteNavigationAttempted'))
+                    self.assertIn('imginn.com', self.page.url)
+
+    def test_video_guard_keyboard_touch_and_explicit_download(self):
+        url = 'https://scontent-mia3-1.cdninstagram.com/story.mp4?token=unchanged'
+        self.documents['/stories/kingjames/'] = profile(f'<a id="play" href="{url}">Play</a><a id="download" href="{url}" download>Download</a>', '''<script>
+          document.addEventListener('click', e => { if (e.target.id === 'download') { window.downloadClicked=true; e.preventDefault(); } });
+          document.addEventListener('touchstart', e => { if (e.target.id === 'play') window.escapedTouch=true; }, true);
+        </script>''')
+        for keyboard in (False, True):
+            self.open_profile('/stories/kingjames/')
+            self.page.locator('#play').wait_for()
+            if keyboard:
+                self.page.locator('#play').press('Enter')
+            else:
+                self.page.locator('#play').dispatch_event('touchstart')
+                self.page.locator('#play').click()
+                self.assertFalse(self.page.evaluate('!!window.escapedTouch'))
+            self.page.locator('video').wait_for()
+            self.page.locator('#download').click()
+            self.assertTrue(self.page.evaluate('window.downloadClicked'))
+            self.assertEqual(self.page.locator('video').count(), 1)
+            self.assertIn('imginn.com/stories/kingjames/', self.page.url)
+
     def test_server_error_and_loading_timeout(self):
         self.documents['/kingjames/'] = '<html><body>Server error, please try again later.</body></html>'
         self.open_profile()

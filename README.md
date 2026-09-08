@@ -10,7 +10,7 @@ Tampermonkey userscript that leaves Instagram alone when you are logged in, but 
 - Opens Imginn post/reel links in an in-page popup.
 - Sends detected private accounts to their normal Instagram profile, including notices that load after the profile header.
 - Keeps Imginn's native story/highlight viewer. A failed click shows an optional Instagram profile link after five seconds, without automatically leaving the page. Cloudflare verification pauses that wait.
-- Plays linked Instagram CDN videos inside the page or popup, with native video controls and an in-place error if the media cannot load. Explicit Download links are left alone.
+- Plays linked Instagram CDN videos inside the page or popup, including Play overlays backed by media data attributes or an existing video. Guards pointer/touch and click events before site document handlers can navigate away. Explicit Download commands are left alone.
 - Uses a single canonical fallback for flaky Imginn post detail links instead of repeatedly requesting unrelated URL variants.
 - Removes Imginn's variable-height profile ad slots and share/download rows without repositioning the profile or post grid.
 - Removes identifiable ad slots and ad-only wrappers above popup media, including ads inserted after loading, without changing carousel sizing or hiding lazy media placeholders.
