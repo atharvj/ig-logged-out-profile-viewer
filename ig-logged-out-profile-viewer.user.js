@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG Logged-Out Profile Viewer
 // @namespace    https://github.com/atharvj/ig-to-imginn-viewer
-// @version      0.5.9
+// @version      0.5.10
 // @description  Opens public Instagram links in Imginn only when logged out, and shows Imginn posts in a popup without losing your place.
 // @author       Intellectual07
 // @license      MIT
@@ -36,7 +36,7 @@
     '[id*="google_ads"]',
     '[class*="adsbygoogle"]',
   ].join(", ");
-  const POST_AD_SELECTOR = `${VIEWER_AD_SELECTOR}, .block-sulvo, .block-money, .demand-supply__display`;
+  const POST_AD_SELECTOR = `${VIEWER_AD_SELECTOR}, .block-sulvo, .block-money, .demand-supply__display, .demand-supply[data-ad]`;
   const LOGIN_PATH_RE = /^\/accounts\/login\/?$/;
   const INSTAGRAM_POST_PATH_RE = /^\/p\/([^/?#]+)\/?$/;
   const INSTAGRAM_REEL_PATH_RE = /^\/reel\/([^/?#]+)\/?$/;

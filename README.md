@@ -14,6 +14,7 @@ Tampermonkey userscript that leaves Instagram alone when you are logged in, but 
 - Uses a single canonical fallback for flaky Imginn post detail links instead of repeatedly requesting unrelated URL variants.
 - Removes Imginn's variable-height profile ad slots and share/download rows without repositioning the profile or post grid.
 - Removes identifiable ad slots and ad-only wrappers above popup media, including ads inserted after loading, without changing carousel sizing or hiding lazy media placeholders.
+- Includes Imginn's `demand-supply[data-ad]` post slots, which can reserve 616px above the media even when no ad loads.
 
 ## Install
 
@@ -32,6 +33,8 @@ On Imginn's Stories page, the first circle labeled Stories is intended for curre
 ## Browser Checks
 
 Install Python's `playwright` package and its Chromium browser, then run `python3 tests/browser_regressions.py`. To use an existing Chromium-based browser, set `IGIV_BROWSER` to its executable path. The tests use local fixtures and do not request live Instagram or Imginn pages.
+
+Optionally set `IGIV_SAVED_POST` to a saved Imginn post HTML file to check its popup layout on desktop and mobile. Saved-page scripts and external requests are blocked during this check; it verifies layout, not live media availability.
 
 ## License
 

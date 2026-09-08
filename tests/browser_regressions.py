@@ -77,7 +77,9 @@ class BrowserRegressions(unittest.TestCase):
         if url.hostname == 'www.instagram.com':
             route.fulfill(content_type='text/html', body='<main id="instagram">Instagram</main>')
         elif url.hostname == 'imginn.com' and url.path in self.documents:
-            route.fulfill(content_type='text/html', body=self.documents[url.path])
+            # Saved pages are untrusted input: keep their layout but disable site scripts.
+            headers = {'Content-Security-Policy': "script-src 'none'; connect-src 'none'; frame-src 'none'"} if url.path == '/p/saved/' else {}
+            route.fulfill(content_type='text/html', body=self.documents[url.path], headers=headers)
         elif url.hostname == 'scontent-test.cdninstagram.com' and self.video_bytes:
             route.fulfill(content_type='video/webm', body=self.video_bytes)
         else:
@@ -220,6 +222,61 @@ class BrowserRegressions(unittest.TestCase):
             self.assertGreater(frame.locator('.swiper-slide').evaluate('(e) => e.getBoundingClientRect().height'), 200)
             self.assertTrue(frame.locator('#real-media').is_visible())
             self.page.screenshot(path=str(Path(tempfile.gettempdir()) / f'igiv-carousel-{width}.png'))
+
+    def test_post_demand_supply_slot_preserves_video_geometry(self):
+        self.documents['/kingjames/'] = profile(f'<a id="post" href="/p/code/"><img src="{PIXEL}" width="220" height="300"></a>')
+        # Structure and sizing from the supplied post HTML, without its personal content.
+        self.documents['/p/code/'] = '''<html><head><style>
+          .page-post {max-width:600px;margin:auto}
+          .hd {height:55px} .cocreator {height:40px}
+          .show {margin:10px auto}
+          .media-wrap {position:relative;overflow:hidden}
+          .media-wrap video {position:absolute;inset:0;width:100%;height:100%}
+          </style></head><body><div class="page-post">
+          <div class="hd">Author</div><div class="cocreator">Co Creator</div>
+          <div data-ad="imginn.com_fluid_all_post_v8" data-devices="m:1,t:1,d:1"
+            style="min-height:616px" class="demand-supply"></div>
+          <div class="post-wrap show"><div class="media-wrap proxy-video" style="padding-top:177.6316%"><video controls></video></div></div>
+          <div style="padding-top:10px;padding-bottom:10px"><div data-ad="imginn.com_large_video_post_download_v8" class="demand-supply"></div></div>
+          <p id="caption">Caption</p></div></body></html>'''
+        for width in (1280, 390):
+            self.page.set_viewport_size({'width': width, 'height':850})
+            self.open_profile()
+            self.page.locator('#post').click()
+            frame = self.page.frame_locator('#igiv-post-modal iframe')
+            frame.locator('html[data-igiv-post-cleanup="true"]').wait_for(state='attached')
+            self.assertTrue(frame.locator('.demand-supply').first.is_hidden())
+            geometry = frame.locator('.media-wrap').evaluate('(e) => ({top:e.getBoundingClientRect().top, ratio:e.getBoundingClientRect().height/e.getBoundingClientRect().width})')
+            self.assertLessEqual(geometry['top'], 115)
+            self.assertAlmostEqual(geometry['ratio'], 1.776316, places=3)
+            self.assertTrue(frame.locator('video').is_visible())
+            self.assertTrue(frame.locator('#caption').is_visible())
+            frame.locator('.show').evaluate('e => { const ad=e.ownerDocument.createElement("div"); ad.className="demand-supply"; ad.dataset.ad="imginn.com_fluid_all_post_v9"; ad.style.minHeight="800px"; e.before(ad); }')
+            self.page.wait_for_timeout(150)
+            self.assertLessEqual(frame.locator('.show').evaluate('(e) => e.getBoundingClientRect().top'), 115)
+
+    @unittest.skipUnless(os.environ.get('IGIV_SAVED_POST'), 'Optional saved-page regression')
+    def test_supplied_post_archive(self):
+        self.documents['/p/saved/'] = Path(os.environ['IGIV_SAVED_POST']).read_text()
+        self.documents['/kingjames/'] = profile(f'<a id="post" href="/p/saved/"><img src="{PIXEL}" width="220" height="300"></a>')
+        for width in (1280, 390):
+            self.page.set_viewport_size({'width':width, 'height':850})
+            self.page.goto('https://imginn.com/p/saved/')
+            original_gap = self.page.locator('.show').evaluate('(e) => e.getBoundingClientRect().top - e.ownerDocument.querySelector(".cocreator").getBoundingClientRect().bottom')
+            self.assertGreaterEqual(original_gap, 616)
+            self.open_profile()
+            self.page.locator('#post').click()
+            frame = self.page.frame_locator('#igiv-post-modal iframe')
+            frame.locator('html[data-igiv-post-cleanup="true"]').wait_for(state='attached')
+            self.page.wait_for_timeout(200)
+            slot = frame.locator('[data-ad="imginn.com_fluid_all_post_v8"]')
+            self.assertTrue(slot.is_hidden())
+            gap = frame.locator('.show').evaluate('(e) => e.getBoundingClientRect().top - e.ownerDocument.querySelector(".cocreator").getBoundingClientRect().bottom')
+            self.assertLessEqual(gap, 20)
+            self.assertTrue(frame.locator('.show video').is_visible())
+            self.assertEqual(frame.locator('.media-wrap').evaluate('(e) => e.style.paddingTop'), '177.632%')
+            print(f'\nSaved post width={width}: gap={original_gap:.1f}px -> {gap:.1f}px', flush=True)
+            self.page.screenshot(path=str(Path(tempfile.gettempdir()) / f'igiv-saved-post-{width}.png'))
 
     def test_story_highlight_error_stays_and_late_media_clears_notice(self):
         self.documents['/stories/kingjames/'] = self.story_document().replace(
