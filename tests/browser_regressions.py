@@ -66,6 +66,7 @@ class BrowserRegressions(unittest.TestCase):
         self.page = self.context.new_page()
         self.errors = []
         self.requests = []
+        self.navigation_requests = []
         self.video_bytes = None
         self.page.on('pageerror', lambda error: self.errors.append(str(error)))
         self.documents = {'/kingjames/': profile()}
@@ -74,6 +75,8 @@ class BrowserRegressions(unittest.TestCase):
     def route(self, route):
         url = urlparse(route.request.url)
         self.requests.append(route.request.url)
+        if route.request.is_navigation_request():
+            self.navigation_requests.append(route.request.url)
         if url.hostname == 'www.instagram.com':
             route.fulfill(content_type='text/html', body='<main id="instagram">Instagram</main>')
         elif url.hostname == 'imginn.com' and url.path in self.documents:
@@ -285,7 +288,13 @@ class BrowserRegressions(unittest.TestCase):
         self.page.wait_for_selector('#highlight[data-igiv-story-control]')
         self.page.locator('#highlight').click()
         self.page.evaluate("() => { const p=document.createElement('p'); p.textContent='Server Error, Refresh later'; document.body.append(p); }")
-        self.page.wait_for_selector('[data-igiv-story-status]', timeout=6500)
+        try:
+            self.page.wait_for_selector('[data-igiv-story-status]', timeout=6500)
+        except Exception:
+            print(self.page.evaluate('''() => ({url:location.href, body:document.body.innerText,
+              media:[...document.querySelectorAll('img,video')].map(e=>({src:e.currentSrc,rect:e.getBoundingClientRect().toJSON()})),
+              statuses:[...document.querySelectorAll('[data-igiv-story-status]')].map(e=>e.outerHTML)})'''), flush=True)
+            raise
         self.assertIn('imginn.com', self.page.url)
         self.page.evaluate(f"() => {{ const img=new Image(); img.src='{PIXEL}'; img.style.cssText='width:300px;height:500px'; document.body.append(img); }}")
         self.page.locator('[data-igiv-story-status]').wait_for(state='detached')
@@ -338,6 +347,22 @@ class BrowserRegressions(unittest.TestCase):
         self.assertIn('imginn.com/stories/kingjames/', self.page.url)
         self.assertTrue(self.page.locator('video').is_visible())
         self.assertTrue(self.page.locator('[data-igiv-video-player] [role="status"]').is_hidden())
+
+        self.documents['/stories/kingjames/'] = profile('''<button id="play"
+          onclick="location.assign('https://scontent-test.cdninstagram.com/story.webm?token=unchanged')">Play</button>''')
+        for width in (1280, 390):
+            self.page.set_viewport_size({'width':width, 'height':850})
+            self.open_profile('/stories/kingjames/')
+            self.page.locator('#play').click()
+            self.page.wait_for_function('document.querySelector("video")?.currentTime > 0')
+            dialog = self.page.locator('[data-igiv-navigation-player]')
+            self.assertTrue(dialog.is_visible())
+            self.assertLessEqual(dialog.bounding_box()['width'], width)
+            self.page.screenshot(path=str(Path(tempfile.gettempdir()) / f'igiv-navigation-video-{width}.png'))
+            self.page.locator('video').evaluate('(e) => { window.lastGuardVideo = e; }')
+            dialog.locator('button').click()
+            dialog.wait_for(state='detached')
+            self.assertTrue(self.page.evaluate('window.lastGuardVideo.paused'))
 
     def test_story_play_overlay_and_early_site_handlers_cannot_navigate(self):
         url = 'https://scontent-mia3-1.cdninstagram.com/story.mp4?token=a%2Bb&oh=keep'
@@ -400,6 +425,48 @@ class BrowserRegressions(unittest.TestCase):
             self.assertTrue(self.page.evaluate('window.downloadClicked'))
             self.assertEqual(self.page.locator('video').count(), 1)
             self.assertIn('imginn.com/stories/kingjames/', self.page.url)
+
+    def test_script_driven_cdn_navigation_is_cancelled(self):
+        for suffix in ('story.mp4?token=a%2Bb&signature=keep', ''):
+            with self.subTest(suffix=suffix):
+                self.page.set_viewport_size({'width':1280 if suffix else 390, 'height':850})
+                url = 'https://scontent-mia5-1.cdninstagram.com/' + suffix
+                self.documents['/stories/kingjames/'] = profile(f'''<button id="open-story"
+                  onclick="setTimeout(() => location.assign('{url}'), 50)">First story</button>''')
+                self.open_profile('/stories/kingjames/')
+                self.assertTrue(self.page.evaluate('!!window.navigation'))
+                self.page.locator('#open-story').click()
+                self.page.wait_for_timeout(500)
+                self.assertIn('imginn.com/stories/kingjames/', self.page.url)
+                self.assertEqual(self.page.locator('[data-igiv-navigation-player]').count(), 1)
+                self.assertFalse(any('cdninstagram.com' in request for request in self.navigation_requests))
+                if suffix:
+                    self.assertEqual(self.page.locator('[data-igiv-navigation-player] video').get_attribute('src'), url)
+                else:
+                    self.assertEqual(self.page.locator('[data-igiv-navigation-player] video').count(), 0)
+                self.page.locator('[data-igiv-navigation-player] button').click()
+                self.page.locator('[data-igiv-navigation-player]').wait_for(state='detached')
+                self.assertEqual(self.page.locator('[data-igiv-navigation-player]').count(), 0)
+
+    def test_script_cdn_redirect_in_popup_and_download_exemption(self):
+        url = 'https://scontent-mia5-1.cdninstagram.com/story.mp4?signature=keep'
+        self.documents['/kingjames/'] = profile(f'<a id="post" href="/p/code/"><img src="{PIXEL}" width="220" height="300"></a>')
+        self.documents['/p/code/'] = f'<html><body><button id="play" onclick="location.replace(\'{url}\')">Play</button></body></html>'
+        self.open_profile()
+        self.page.locator('#post').click()
+        frame = self.page.frame_locator('#igiv-post-modal iframe')
+        frame.locator('html[data-igiv-click-handler="true"]').wait_for(state='attached')
+        frame.locator('#play').click()
+        frame.locator('[data-igiv-navigation-player] video').wait_for()
+        self.assertFalse(any('cdninstagram.com' in request for request in self.navigation_requests))
+        frame.locator('[data-igiv-navigation-player] button').press('Escape')
+        frame.locator('[data-igiv-navigation-player]').wait_for(state='detached')
+
+        self.documents['/stories/kingjames/'] = profile(f'<a id="download" href="{url}">Download</a>')
+        self.open_profile('/stories/kingjames/')
+        self.page.locator('#download').click()
+        self.page.wait_for_timeout(500)
+        self.assertIn(url, self.navigation_requests)
 
     def test_server_error_and_loading_timeout(self):
         self.documents['/kingjames/'] = '<html><body>Server error, please try again later.</body></html>'

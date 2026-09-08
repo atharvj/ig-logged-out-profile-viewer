@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG Logged-Out Profile Viewer
 // @namespace    https://github.com/atharvj/ig-to-imginn-viewer
-// @version      0.5.11
+// @version      0.5.12
 // @description  Opens public Instagram links in Imginn only when logged out, and shows Imginn posts in a popup without losing your place.
 // @author       Intellectual07
 // @license      MIT
@@ -1769,22 +1769,79 @@
     const view = doc.defaultView;
     if (!view || videoGuardDocuments.has(doc)) return;
     videoGuardDocuments.add(doc);
+    let downloadIntent = null;
+    const rememberDownload = (event) => {
+      const link = closestAnchor(event.target);
+      downloadIntent = link && !linkedVideoTarget(event) &&
+        (link.hasAttribute("download") || /\bdownload\b/i.test(normalizedText(link)))
+        ? { href: link.href, until: view.performance.now() + 1000 } : null;
+    };
     // Window capture runs before document/element handlers that may navigate to the CDN.
     const stopEarlyNavigation = (event) => {
+      rememberDownload(event);
       if (linkedVideoTarget(event)) event.stopImmediatePropagation();
     };
     for (const type of ["pointerdown", "mousedown", "touchstart"]) {
       view.addEventListener(type, stopEarlyNavigation, { capture: true, passive: true });
     }
     view.addEventListener("click", (event) => {
+      rememberDownload(event);
       const target = linkedVideoTarget(event);
-      if (target) playLinkedVideo(event, target);
+      if (target) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        playLinkedVideo(target);
+      }
     }, true);
+
+    // Also catch location.assign/replace and other script-driven same-tab departures.
+    // Cross-origin navigation cannot be intercepted, but cancelable events can be stopped.
+    view.navigation?.addEventListener("navigate", (event) => {
+      if (!event.cancelable || event.navigationType === "traverse" || event.downloadRequest != null) return;
+      const url = parseUrl(event.destination.url);
+      if (!url || url.protocol !== "https:" ||
+          !(url.hostname === "cdninstagram.com" || url.hostname.endsWith(".cdninstagram.com"))) return;
+      if (downloadIntent && downloadIntent.href === url.href && downloadIntent.until >= view.performance.now()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      showBlockedMediaNavigation(doc, url);
+    });
   }
 
-  function playLinkedVideo(event, { source, existingVideo, url }) {
-    event.preventDefault();
-    event.stopImmediatePropagation();
+  function showBlockedMediaNavigation(doc, url) {
+    const previous = doc.querySelector('[data-igiv-navigation-player]');
+    if (previous) previous.close();
+    const dialog = doc.createElement("dialog");
+    dialog.dataset.igivNavigationPlayer = "true";
+    dialog.setAttribute("aria-label", "Story media");
+    dialog.style.cssText = "box-sizing:border-box;width:min(680px,calc(100vw - 32px));max-height:90vh;padding:16px;border:0;border-radius:8px;background:#fff;color:#111;font:14px/1.4 sans-serif;overflow:auto";
+    const close = doc.createElement("button");
+    close.type = "button";
+    close.textContent = "\u00d7";
+    close.title = "Close";
+    close.setAttribute("aria-label", "Close");
+    close.style.cssText = "display:block;margin:0 0 8px auto;width:32px;height:32px;padding:0;font-size:24px;cursor:pointer";
+    close.addEventListener("click", () => dialog.close());
+    dialog.addEventListener("close", () => {
+      dialog.querySelectorAll("video").forEach((video) => video.pause());
+      dialog.remove();
+    }, { once: true });
+    dialog.append(close);
+    (doc.body || doc.documentElement).append(dialog);
+    dialog.showModal();
+    if (/\.(mp4|webm)$/i.test(url.pathname)) {
+      const source = doc.createElement("div");
+      dialog.append(source);
+      playLinkedVideo({ source, existingVideo: null, url });
+    } else {
+      const status = doc.createElement("p");
+      status.setAttribute("role", "status");
+      status.textContent = "The story tried to open Instagram's media server without a recognized video link. Navigation was stopped.";
+      dialog.append(status);
+    }
+  }
+
+  function playLinkedVideo({ source, existingVideo, url }) {
     const doc = source.ownerDocument;
     const container = doc.createElement("div");
     container.dataset.igivVideoPlayer = "true";

@@ -11,6 +11,7 @@ Tampermonkey userscript that leaves Instagram alone when you are logged in, but 
 - Sends detected private accounts to their normal Instagram profile, including notices that load after the profile header.
 - Keeps Imginn's native story/highlight viewer. A failed click shows an optional Instagram profile link after five seconds, without automatically leaving the page. Cloudflare verification pauses that wait.
 - Plays linked Instagram CDN videos inside the page or popup, including Play overlays backed by media data attributes or an existing video. Guards pointer/touch and click events before site document handlers can navigate away. Explicit Download commands are left alone.
+- On browsers with the Navigation API, also cancels same-tab, script-triggered departures to `cdninstagram.com`. Recognized video URLs open in a dismissible on-page player; bare server URLs are blocked without attempting playback. Download commands and history traversal remain unaffected.
 - Uses a single canonical fallback for flaky Imginn post detail links instead of repeatedly requesting unrelated URL variants.
 - Removes Imginn's variable-height profile ad slots and share/download rows without repositioning the profile or post grid.
 - Removes identifiable ad slots and ad-only wrappers above popup media, including ads inserted after loading, without changing carousel sizing or hiding lazy media placeholders.
@@ -29,6 +30,8 @@ This script depends on what Imginn exposes publicly. If Imginn only has a thumbn
 Account privacy cannot be determined from a username alone. The script redirects when Imginn identifies a private account or cannot provide its profile. Instagram may require login to show stories or private content.
 
 On Imginn's Stories page, the first circle labeled Stories is intended for current stories; named circles are highlights. A circle does not guarantee playable media is available. Imginn can return errors or older profile data, and Instagram CDN links can expire. This script cannot force Imginn to fetch the latest posts or recover unavailable stories.
+
+The extra navigation guard uses cancelable [`navigate` events](https://developer.chrome.com/docs/web-platform/navigation-api). On browsers without that API, the click/Play guards still run, but script-triggered redirects cannot be caught by that additional check. It does not intercept separate tabs opened by the site.
 
 ## Browser Checks
 
